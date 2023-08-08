@@ -36,6 +36,8 @@ jobs:
         uses: actions/checkout@v3
         with:
           repository: "hx210/Openwrt-XR"
+          ref: main
+          token: ${{ secrets.REPO_SECRET }}
 
       - name: 初始化环境
         id: environment
@@ -47,6 +49,12 @@ jobs:
           echo "CONTAINER_HOME_DIRECTORY=$CONTAINER_HOME_DIRECTORY" >>"$GITHUB_ENV"
           DOCKER_SDK_GITHUB_WORKSPACE="$CONTAINER_HOME_DIRECTORY/source_repo"
           echo "DOCKER_SDK_GITHUB_WORKSPACE=$DOCKER_SDK_GITHUB_WORKSPACE" >>"$GITHUB_ENV"
+          DOCKER_SDK_CUSTOM_FEED="$CONTAINER_HOME_DIRECTORY/custom-feed"
+          echo "DOCKER_SDK_CUSTOM_FEED=$DOCKER_SDK_CUSTOM_FEED" >>"$GITHUB_ENV"
+          artifact_local_path="${OPENWRT_ROOT_PATH}/artifact_path"
+          echo "artifact_local_path=$artifact_local_path" >>"$GITHUB_ENV"
+          artifact_path="$CONTAINER_HOME_DIRECTORY/artifact_path"
+          echo "artifact_path=$artifact_path" >>"$GITHUB_ENV"
           mkdir -p ${OPENWRT_ROOT_PATH}
 
       - name: 加载社区插件
@@ -63,14 +71,18 @@ jobs:
           popd
 
       - name: 启动容器
+        timeout-minutes: 12
         env:
           DEST_TARGETS: ${{matrix.target}}
         run: |
           sudo -E docker run -dt --name sdk -v ${OPENWRT_ROOT_PATH}/packages/:${CONTAINER_HOME_DIRECTORY}/packages/  \
               -e DEST_TARGETS \
-              -v ${OPENWRT_ROOT_PATH}/key-build:${CONTAINER_HOME_DIRECTORY}/openwrt/key-build  \
+              -e DOCKER_SDK_CUSTOM_FEED \
+              -e artifact_path \
+              -v ${OPENWRT_ROOT_PATH}/key-build:${CONTAINER_HOME_DIRECTORY}/key-build  \
+              -v ${artifact_local_path}:${artifact_path} \
               -v $GITHUB_WORKSPACE:${DOCKER_SDK_GITHUB_WORKSPACE} \
-              -v ${community_plus_path}:${CONTAINER_HOME_DIRECTORY}/custom-feed/ \
+              -v ${community_plus_path}:${DOCKER_SDK_CUSTOM_FEED} \
               openwrt/sdk:${{matrix.target}}-${{matrix.SOURCE_BRANCH}}
 
       - name: Setup tmate session
@@ -90,10 +102,10 @@ jobs:
           DEST_TARGETS: ${{matrix.target}}
         run: |
           $GITHUB_WORKSPACE/scripts/sdk-basic.sh
-          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/sdk-compile.sh init
-          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/basic.sh sdk
-          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/updata-feeds.sh
-          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/sdk-compile.sh
+          docker exec -u root sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/sdk-compile.sh init
+          docker exec -u root sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/basic.sh sdk
+          docker exec -u root sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/updata-feeds.sh
+          docker exec -u root sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/sdk-compile.sh
 
       - name: 恢复目录权限
         if: always()
@@ -109,15 +121,15 @@ jobs:
 
       - name: Deploy Full Files To Cloud Drives
         env:
-          OPKG_COMMUNITY_SOURCE_NAME: ${{ secrets.OPKG_COMMUNITY_SOURCE_NAME }}
+          OPKG_COMMUNITY_SOURCE_NAME: community
         if: env.FIRMWARE_RELEASE_UPLOAD == 'true'
         run: |
           echo "rclone_path=${rclone_config_file_path}"
           sudo cat>"${rclone_config_file_path}"<<EOF
           ${{ secrets.RCLONE_CONFIG }}
           EOF
-          sudo rclone mkdir "${rclone_use_config}:${DEST_TARGETS_PATH}/${OPKG_COMMUNITY_SOURCE_NAME}"
-          sudo rclone sync -q -L "${{ env.OPENWRT_ROOT_PATH }}/packages/${OPKG_COMMUNITY_SOURCE_NAME}" "${rclone_use_config}:${DEST_TARGETS_PATH}/${OPKG_COMMUNITY_SOURCE_NAME}" --exclude-from "$GITHUB_WORKSPACE/scripts/exclude-file.txt"
+          DEST_TARGETS_PATH="${{ secrets.RCLONE_USE_CONFIG_PREPATH }}/${DEST_TARGETS_PATH}"
+          sudo rclone sync -q -L "${{ env.artifact_local_path }}/${OPKG_COMMUNITY_SOURCE_NAME}" "${{ secrets.RCLONE_USE_CONFIG }}:${DEST_TARGETS_PATH}/${OPKG_COMMUNITY_SOURCE_NAME}" --exclude-from "$GITHUB_WORKSPACE/scripts/exclude-file.txt"
 
       - name: Show directory information
         if: always()
