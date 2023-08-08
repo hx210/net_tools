@@ -1,0 +1,126 @@
+name: Build openwrt-sdk
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: "Debug over ssh"
+        required: false
+        type: boolean
+      email_to:
+        description: "邮件推送"
+        required: false
+        type: string
+        default: ""
+  schedule:
+    - cron: 0 20 */14 * *
+
+env:
+  CONFIG_FILE: config/sdk-basic.conf
+  TZ: Asia/Shanghai
+  FIRMWARE_RELEASE_UPLOAD: true
+
+jobs:
+  compile-plugin:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          [x86_64, aarch64_cortex-a53, aarch64_cortex-a72, aarch64_generic]
+
+        SOURCE_BRANCH: [SNAPSHOT]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          repository: "hx210/Openwrt-XR"
+
+      - name: 初始化环境
+        id: environment
+        run: |
+          chmod +x $GITHUB_WORKSPACE/scripts/*.sh
+          OPENWRT_ROOT_PATH=$HOME/workspace
+          echo "OPENWRT_ROOT_PATH=$OPENWRT_ROOT_PATH" >>"$GITHUB_ENV"
+          CONTAINER_HOME_DIRECTORY=/builder
+          echo "CONTAINER_HOME_DIRECTORY=$CONTAINER_HOME_DIRECTORY" >>"$GITHUB_ENV"
+          DOCKER_SDK_GITHUB_WORKSPACE="$CONTAINER_HOME_DIRECTORY/source_repo"
+          echo "DOCKER_SDK_GITHUB_WORKSPACE=$DOCKER_SDK_GITHUB_WORKSPACE" >>"$GITHUB_ENV"
+          mkdir -p ${OPENWRT_ROOT_PATH}
+
+      - name: 加载社区插件
+        run: |
+          $GITHUB_WORKSPACE/scripts/op-openwrt.sh
+
+      - name: Import Build Keys
+        env:
+          BUILD_PRIVATEKEY: ${{ secrets.BUILD_PRIVATEKEY }}
+        if: env.BUILD_PRIVATEKEY != null
+        run: |
+          pushd $OPENWRT_ROOT_PATH
+          echo -e "$BUILD_PRIVATEKEY" > key-build
+          popd
+
+      - name: 启动容器
+        env:
+          DEST_TARGETS: ${{matrix.target}}
+        run: |
+          sudo -E docker run -dt --name sdk -v ${OPENWRT_ROOT_PATH}/packages/:${CONTAINER_HOME_DIRECTORY}/packages/  \
+              -e DEST_TARGETS \
+              -v ${OPENWRT_ROOT_PATH}/key-build:${CONTAINER_HOME_DIRECTORY}/openwrt/key-build  \
+              -v $GITHUB_WORKSPACE:${DOCKER_SDK_GITHUB_WORKSPACE} \
+              -v ${community_plus_path}:${CONTAINER_HOME_DIRECTORY}/custom-feed/ \
+              openwrt/sdk:${{matrix.target}}-${{matrix.SOURCE_BRANCH}}
+
+      - name: Setup tmate session
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        uses: mxschmitt/action-tmate@v3
+
+      - uses: actions/setup-python@v4.7.0
+        if: ${{ runner.os == 'Linux' && runner.arch == 'X64' || runner.arch == 'X86' }}
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install chardet
+
+      - name: 编译
+        if: ${{ ! inputs.debug_enabled }}
+        env:
+          DEST_TARGETS: ${{matrix.target}}
+        run: |
+          $GITHUB_WORKSPACE/scripts/sdk-basic.sh
+          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/sdk-compile.sh init
+          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/basic.sh sdk
+          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/updata-feeds.sh
+          docker exec sdk /bin/bash $DOCKER_SDK_GITHUB_WORKSPACE/scripts/sdk-compile.sh
+
+      - name: 恢复目录权限
+        if: always()
+        run: |
+          sudo -E chown -R "${USER}:${GROUPS[0]}" ${OPENWRT_ROOT_PATH}
+          sudo -E chown -R "${USER}:${GROUPS[0]}" $GITHUB_WORKSPACE
+
+      - name: Rclone-tools
+        env:
+          DEST_TARGETS: ${{matrix.target}}
+        run: |
+          $GITHUB_WORKSPACE/scripts/rclone_config_path.sh ${DEST_TARGETS}
+
+      - name: Deploy Full Files To Cloud Drives
+        env:
+          OPKG_COMMUNITY_SOURCE_NAME: ${{ secrets.OPKG_COMMUNITY_SOURCE_NAME }}
+        if: env.FIRMWARE_RELEASE_UPLOAD == 'true'
+        run: |
+          echo "rclone_path=${rclone_config_file_path}"
+          sudo cat>"${rclone_config_file_path}"<<EOF
+          ${{ secrets.RCLONE_CONFIG }}
+          EOF
+          sudo rclone mkdir "${rclone_use_config}:${DEST_TARGETS_PATH}/${OPKG_COMMUNITY_SOURCE_NAME}"
+          sudo rclone sync -q -L "${{ env.OPENWRT_ROOT_PATH }}/packages/${OPKG_COMMUNITY_SOURCE_NAME}" "${rclone_use_config}:${DEST_TARGETS_PATH}/${OPKG_COMMUNITY_SOURCE_NAME}" --exclude-from "$GITHUB_WORKSPACE/scripts/exclude-file.txt"
+
+      - name: Show directory information
+        if: always()
+        run: |
+          cd $OPENWRT_ROOT_PATH
+          tree -L 4
